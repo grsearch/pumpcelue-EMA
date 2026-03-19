@@ -83,9 +83,15 @@ app.post('/api/remove-token', async (req, res) => {
   const ws            = require('./birdeyeWs');
   const webhookSender = require('./webhookSender');
 
+  // 首仓未平：发 SELL
   if (token.positionOpen) {
     await webhookSender.sendSell(address, token.symbol, 'MANUAL_REMOVE', token.price);
     token.positionOpen = false;
+  }
+  // 加仓未平：发 SELL
+  if (token.addPositionOpen) {
+    await webhookSender.sendSell(address, token.symbol, 'MANUAL_REMOVE', token.price);
+    token.addPositionOpen = false;
   }
   ws.unsubscribe(address);
   tokenStore.removeToken(address);
@@ -106,7 +112,9 @@ tokenStore.on('tokenUpdated', (token) => io.emit('tokenUpdated', {
   pnl:                     token.pnl,
   positionOpen:            token.positionOpen,
   isFirstPosition:         token.isFirstPosition,
-  firstPositionEntryPrice: token.firstPositionEntryPrice,
+  entryPrice:              token.entryPrice,
+  addPositionOpen:         token.addPositionOpen,
+  addEntryPrice:           token.addEntryPrice,
   active:                  token.active,
 }));
 
@@ -129,7 +137,9 @@ function _safeToken(t) {
     rsi:                     t.rsi !== null && t.rsi !== undefined ? parseFloat(t.rsi.toFixed(2)) : null,
     positionOpen:            t.positionOpen,
     isFirstPosition:         t.isFirstPosition,
-    firstPositionEntryPrice: t.firstPositionEntryPrice,
+    entryPrice:              t.entryPrice,
+    addPositionOpen:         t.addPositionOpen,
+    addEntryPrice:           t.addEntryPrice,
     additionCount:           t.additionCount,
     sellCount:               t.sellCount,
     active:                  t.active,
