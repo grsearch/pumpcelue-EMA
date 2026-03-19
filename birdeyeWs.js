@@ -102,7 +102,7 @@ class BirdeyeWsManager {
       try {
         this.ws.send(JSON.stringify({
           type: 'UNSUBSCRIBE_TXS',
-          data: { address },
+          data: { queryType: 'simple', address },
         }));
         console.log(`[BirdEye WS] Unsubscribed: ${address}`);
       } catch (_) {}
@@ -115,7 +115,7 @@ class BirdeyeWsManager {
     try {
       this.ws.send(JSON.stringify({
         type: 'SUBSCRIBE_TXS',
-        data: { address },
+        data: { queryType: 'simple', address },
       }));
       console.log(`[BirdEye WS] Subscribed trades: ${address}`);
     } catch (e) {
