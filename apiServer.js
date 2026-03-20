@@ -37,6 +37,9 @@ app.post('/webhook/add-token', async (req, res) => {
   }
 
   try {
+    // 先把 token 加入 store 占位，防止重复请求绕过去重检查
+    // （202 立即返回后，onTokenReceived 异步执行期间可能收到重复 webhook）
+    tokenStore.addToken(address, symbol, network);
     // 立即返回 202，后台异步处理（避免 BirdEye REST 慢导致 webhook 超时）
     res.status(202).json({ success: true, message: 'Token queued for monitoring', address, symbol });
     await onTokenReceived({ address, symbol, network });
