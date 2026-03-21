@@ -1,10 +1,9 @@
 // src/tokenMonitor.js
-// 代币生命周期管理：加入白名单、元数据刷新、年龄追踪、到期退出
+// 代币生命周期管理
 //
 // 双轨价格驱动：
-//   主轨：BirdEye WS 成交流 → 实时聚合 5s K 线（有成交时最精确）
-//   备轨：每 5s REST 轮询最新价格 → 若 WS 静默则强制生成 5s K 线
-//         保证低流动性新币或 WS 推送延迟时策略仍能正常运行
+//   主轨：BirdEye WS 成交流 → 实时聚合 5s K 线
+//   备轨：每 5s REST 轮询 → WS 静默时生成兜底 K 线
 
 const tokenStore    = require('./tokenStore');
 const birdeyeWs     = require('./birdeyeWs');
@@ -13,48 +12,35 @@ const { evaluateStrategy }                     = require('./strategy');
 const webhookSender = require('./webhookSender');
 const config        = require('./config');
 
-const MAX_AGE_MS   = config.monitor.tokenMaxAgeMinutes * 60 * 1000;
-const CANDLE_SEC   = config.monitor.candleIntervalSeconds; // 5
+const MAX_AGE_MS = config.monitor.tokenMaxAgeMinutes * 60 * 1000;
+const CANDLE_SEC = config.monitor.candleIntervalSeconds;
 
 // ─────────────────────────────────────────────────────────────────
-// 公共入口
+// 收到新代币
 // ─────────────────────────────────────────────────────────────────
 
-/**
- * 收到扫描服务器 webhook 时调用
- */
 async function onTokenReceived({ address, symbol, network }) {
   console.log(`[Monitor] New token: ${symbol} (${address})`);
 
-  // 加入内存白名单
-  const token = tokenStore.addToken(address, symbol, network);
+  // 加入白名单（tokenStore.addToken 有内置去重）
+  tokenStore.addToken(address, symbol, network);
 
-  // 1) 立即发送首仓 BUY 信号
-  await webhookSender.sendBuy(address, symbol, 'FIRST_POSITION', null);
-  token.positionOpen    = true;
-  token.isFirstPosition = true;  // 首仓：仅止盈卖出，RSI 卖出不生效
-  token.entryPrice      = null;  // 拉取元数据后填入
-  token.additionCount   = 0;
-
-  // 2) 拉取初始元数据，将当前价格记为首仓入场价
+  // 拉取初始元数据
   await refreshMetadata(address);
-  const tok = tokenStore.getToken(address);
-  if (tok && tok.price) {
-    tok.entryPrice = tok.price;
-    console.log(`[Monitor] Entry price: $${tok.price} for ${symbol}`);
-  }
 
-  // 3) 用历史 1m K 线预热 RSI（新币可能无数据，属正常）
+  // 预热历史 closes（缩短 RSI 冷启动时间）
   await seedHistoricalCloses(address);
 
-  // 4) 订阅 WS 成交流（主轨）
+  // 订阅 WS 成交流（主轨）
   birdeyeWs.subscribe(address);
 
-  // 5) 启动 REST 兜底轮询（备轨）
+  // 启动 REST 兜底轮询（备轨）
   startRestFallback(address);
 
-  // 6) 启动年龄计时器
+  // 启动年龄计时器
   startAgeTicker(address);
+
+  console.log(`[Monitor] ${symbol} is now being monitored. Waiting for RSI cross↑${config.rsi.buyCross} to buy.`);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -85,11 +71,7 @@ async function seedHistoricalCloses(address) {
 
     if (closes.length > 0) {
       token.closes = closes;
-      // strategy.js 每次从 closes 直接计算 prevRsi，不依赖 token.rsi，
-      // 所以这里只需存入 closes 即可，无需预填 token.rsi
-      console.log(
-        `[Monitor] Seeded ${closes.length} x 1m closes for ${token.symbol}`
-      );
+      console.log(`[Monitor] Seeded ${closes.length} x 1m closes for ${token.symbol}`);
       return;
     }
   }
@@ -98,16 +80,9 @@ async function seedHistoricalCloses(address) {
 
 // ─────────────────────────────────────────────────────────────────
 // REST 兜底轮询（备轨）
-//
-// 每 CANDLE_SEC 秒轮询一次最新价格。
-// 若 WS 成交流正常工作，_candleWindow 会随成交不断更新，
-// 兜底逻辑检测到"当前窗口已被 WS 处理"则跳过，不重复生成蜡烛。
-// 若 WS 静默（无成交推送），兜底定时器在窗口到期时用 REST 价格封口，
-// 强制产生一根蜡烛，触发策略计算。
 // ─────────────────────────────────────────────────────────────────
 
 function startRestFallback(address) {
-  // 记录上一次兜底封口的窗口起始时间，防止重复封口同一窗口
   let lastFallbackWindow = -1;
 
   const timer = setInterval(async () => {
@@ -120,35 +95,26 @@ function startRestFallback(address) {
     const now         = Math.floor(Date.now() / 1000);
     const windowStart = Math.floor(now / CANDLE_SEC) * CANDLE_SEC;
 
-    // 若 WS 已在当前窗口产生了成交，跳过（WS 主轨优先）
-    if (token._candleWindow && token._candleWindow.windowStart === windowStart) {
-      return;
-    }
-
-    // 若本轮已经兜底过这个窗口，跳过
+    if (token._candleWindow && token._candleWindow.windowStart === windowStart) return;
     if (lastFallbackWindow === windowStart) return;
 
-    // 拉取最新价格
     const price = await getPrice(address);
     if (!price || price <= 0) return;
 
-    // 再次检查（await 期间 WS 可能已处理）
     if (token._candleWindow && token._candleWindow.windowStart === windowStart) return;
     if (!token.active) return;
 
-    // 更新价格
     tokenStore.updateTokenData(address, { price });
 
-    // 生成兜底蜡烛（open=high=low=close=price，volume=0）
     const candle = {
-      time:     windowStart,
-      open:     price,
-      high:     price,
-      low:      price,
-      close:    price,
-      volume:   0,
-      trades:   0,
-      isFallback: true, // 标记为 REST 兜底，非真实成交
+      time:       windowStart,
+      open:       price,
+      high:       price,
+      low:        price,
+      close:      price,
+      volume:     0,
+      trades:     0,
+      isFallback: true,
     };
 
     token.candles.push(candle);
@@ -158,9 +124,9 @@ function startRestFallback(address) {
     tokenStore.emit('newCandle', { address, candle, token });
 
     lastFallbackWindow = windowStart;
-    console.log(`[Fallback] ${token.symbol} REST candle @ $${price.toFixed(8)} (no WS trade in window)`);
+    console.log(`[Fallback] ${token.symbol} @ $${price.toFixed(8)}`);
 
-  }, CANDLE_SEC * 1000); // 每 5 秒执行一次
+  }, CANDLE_SEC * 1000);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -181,27 +147,26 @@ function startAgeTicker(address) {
     const ageMs = now - token.addedAt;
     token.age   = Math.floor(ageMs / 60000);
 
-    // 每 30s 刷新一次元数据
+    // 每 30s 刷新元数据
     if (now - lastMetaRefresh >= 30000) {
       lastMetaRefresh = now;
       await refreshMetadata(address);
     }
 
-    // 到期处理
+    // 到期处理：先停止再发信号
     if (ageMs >= MAX_AGE_MS) {
       console.log(`[Monitor] Expired: ${token.symbol} (${token.age}m)`);
       clearInterval(interval);
-      // 先停止所有数据流和策略（防止 await 期间 restFallback 触发买入）
       birdeyeWs.unsubscribe(address);
-      tokenStore.removeToken(address); // 立即设 active=false，阻断所有后续策略
-      // 再发 SELL 信号（active=false 后 evaluateStrategy 不会再运行）
-      if (token.positionOpen) {
-        await webhookSender.sendSell(address, token.symbol, 'AGE_EXPIRE', token.price);
-        token.positionOpen = false;
-      }
+      tokenStore.removeToken(address); // 立即 active=false，阻断策略
+      // 有持仓则发 SELL
       if (token.addPositionOpen) {
         await webhookSender.sendSell(address, token.symbol, 'AGE_EXPIRE', token.price);
         token.addPositionOpen = false;
+      }
+      if (token.positionOpen) {
+        await webhookSender.sendSell(address, token.symbol, 'AGE_EXPIRE', token.price);
+        token.positionOpen = false;
       }
       console.log(`[Monitor] Removed: ${token.symbol}`);
     }
@@ -209,13 +174,13 @@ function startAgeTicker(address) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 新蜡烛事件 → 策略
+// 新蜡烛 → 策略（传入 candle 对象供策略使用 high/low）
 // ─────────────────────────────────────────────────────────────────
 
 tokenStore.on('newCandle', async ({ address, candle, token }) => {
   if (!token.active) return;
   try {
-    await evaluateStrategy(address);
+    await evaluateStrategy(address, candle);
   } catch (err) {
     console.error(`[Monitor] Strategy error for ${token.symbol}:`, err.message);
   }
