@@ -104,7 +104,8 @@ async function evaluateStrategy(address, candle) {
   }
 
   // ── RSI(7) 上穿 30 → 买入 ────────────────────────────────────────
-  if (!token.addPositionOpen &&
+  // hasBought=true 表示本监控周期已买过，不再重复买入
+  if (!token.addPositionOpen && !token.hasBought &&
       prevRsi < config.rsi.buyCross &&
       rsi >= config.rsi.buyCross) {
     if (!token.active) return;
@@ -116,6 +117,7 @@ async function evaluateStrategy(address, candle) {
     );
     token.addPositionOpen = true;
     token.addEntryPrice   = price;
+    token.hasBought       = true; // 标记已买，本周期不再触发
     token.pnl             = 0;
     token.additionCount++;
   }
