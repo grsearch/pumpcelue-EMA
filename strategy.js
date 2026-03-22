@@ -5,23 +5,23 @@
 // │  立即 BUY（FIRST_POSITION），不做任何过滤                        │
 // │                                                                 │
 // │  首仓卖出（positionOpen=true）：                                 │
-// │    K线high 相对首仓入场价 +50% → SELL TP                        │
+// │    K线high 相对首仓入场价 +150% → SELL TP                       │
 // │    加仓未发生时 RSI 信号不触发首仓卖出                            │
 // │    加仓已发生后 RSI>80 / RSI下穿70 也触发全部卖出                 │
 // │                                                                 │
-// │  加仓买入条件（同时满足）：                                       │
+// │  加仓买入条件：                                                  │
 // │    1. RSI(7) 上穿 30                                            │
-// │    2. EMA9 >= EMA20 × 0.97（过滤明显下跌趋势）                   │
+// │    2. 首仓盈利中 或 首仓已止盈出场（强势币过滤）                   │
 // │    3. 无持仓时触发，卖出后可再次买入                              │
 // │    4. 已有持仓且跌超-20%时可第二次加仓（最多2次）                  │
 // │                                                                 │
 // │  加仓卖出：                                                      │
-// │    K线high 相对加仓入场价 +50% → SELL TP                        │
+// │    K线high 相对加仓入场价 +150% → SELL TP                       │
 // │    RSI > 80 → SELL                                              │
 // │    RSI 下穿 70 → SELL                                           │
 // │                                                                 │
 // │  白名单退出（tokenMonitor 负责）：                               │
-// │    60分钟到期 / FDV < 10000                                     │
+// │    30分钟到期 / FDV < 10000                                     │
 // └─────────────────────────────────────────────────────────────────┘
 
 const { RSI } = require('technicalindicators');
@@ -147,11 +147,12 @@ async function evaluateStrategy(address, candle) {
     if (!token.active) return;
 
     // 判断是否允许执行RSI策略
+    // 情况A：首仓持有且当前价格 > 首仓入场价（盈利中 → 强势币）
     const firstPosInProfit = token.positionOpen &&
                              token.entryPrice &&
-                             price > token.entryPrice;   // 首仓持有且盈利
-    const firstPosTookProfit = !token.positionOpen &&
-                               token.sellCount > 0;      // 首仓已止盈出场
+                             price > token.entryPrice;
+    // 情况B：首仓已止盈出场（firstPosSold 标志，不依赖 sellCount 避免加仓卖出干扰）
+    const firstPosTookProfit = token.firstPosSold === true;
 
     const rsiStrategyAllowed = firstPosInProfit || firstPosTookProfit;
 
@@ -182,6 +183,10 @@ async function evaluateStrategy(address, candle) {
 
 // 任何 SELL 信号机器人全仓卖出，所有仓位状态联动清除
 function _clearAll(token) {
+  // 如果首仓还在，标记首仓已出场
+  if (token.positionOpen) {
+    token.firstPosSold = true;
+  }
   token.positionOpen    = false;
   token.isFirstPosition = false;
   token.entryPrice      = null;
