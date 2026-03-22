@@ -25,8 +25,22 @@ async function onTokenReceived({ address, symbol, network }) {
   // 加入白名单（tokenStore.addToken 有内置去重）
   tokenStore.addToken(address, symbol, network);
 
-  // 拉取初始元数据
+  // 1) 立即发送首仓 BUY 信号
+  await webhookSender.sendBuy(address, symbol, 'FIRST_POSITION', null);
+  const tok0 = tokenStore.getToken(address);
+  if (tok0) {
+    tok0.positionOpen    = true;
+    tok0.isFirstPosition = true;
+    tok0.entryPrice      = null; // 拉取元数据后填入
+  }
+
+  // 2) 拉取初始元数据，记录首仓入场价
   await refreshMetadata(address);
+  const tok1 = tokenStore.getToken(address);
+  if (tok1 && tok1.price) {
+    tok1.entryPrice = tok1.price;
+    console.log(`[Monitor] First pos entry price: $${tok1.price} for ${symbol}`);
+  }
 
   // 预热历史 closes（缩短 RSI 冷启动时间）
   await seedHistoricalCloses(address);
@@ -157,7 +171,7 @@ function startAgeTicker(address) {
     const ageExpired = ageMs >= MAX_AGE_MS;
 
     // ── 退出条件 2：FDV 低于最小值（默认 10000 USD）────────────────
-    // FDV 过低说明市值已大幅萎缩，继续持有意义不大
+    // FDV 过低说明市喀已大幅萎缩，继续持有意义不大
     const fdvTooLow = token.fdv !== null && token.fdv < config.monitor.fdvMinimum;
 
     if (ageExpired || fdvTooLow) {
