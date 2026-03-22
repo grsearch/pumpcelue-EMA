@@ -24,15 +24,12 @@
 // │    60分钟到期 / FDV < 10000                                     │
 // └─────────────────────────────────────────────────────────────────┘
 
-const { RSI, EMA } = require('technicalindicators');
+const { RSI } = require('technicalindicators');
 const config        = require('./config');
 const tokenStore    = require('./tokenStore');
 const webhookSender = require('./webhookSender');
 
 const RSI_PERIOD = config.rsi.period; // 7
-const EMA9_PERIOD  = 9;
-const EMA20_PERIOD = 20;
-
 function calcRSI(closes) {
   if (closes.length < RSI_PERIOD + 1) return null;
   const values = RSI.calculate({ values: closes, period: RSI_PERIOD });
@@ -40,12 +37,6 @@ function calcRSI(closes) {
   return values[values.length - 1];
 }
 
-function calcEMA(closes, period) {
-  if (closes.length < period) return null;
-  const values = EMA.calculate({ values: closes, period });
-  if (!values || values.length === 0) return null;
-  return values[values.length - 1];
-}
 
 async function evaluateStrategy(address, candle) {
   const token = tokenStore.getToken(address);
@@ -64,10 +55,6 @@ async function evaluateStrategy(address, candle) {
   token.rsi     = rsi;
 
   if (prevRsi === null) return;
-
-  // 计算 EMA9 / EMA20（用于加仓过滤）
-  const ema9  = calcEMA(closes, EMA9_PERIOD);
-  const ema20 = calcEMA(closes, EMA20_PERIOD);
 
   const price = token.price || closes[closes.length - 1];
   const high  = (candle && candle.high) ? candle.high : price;
@@ -151,18 +138,25 @@ async function evaluateStrategy(address, candle) {
   }
 
   // ── RSI 上穿 30 → 加仓买入 ───────────────────────────────────────
-  // 加仓过滤条件：EMA9 >= EMA20 × 0.97（过滤明显下跌趋势）
-  // 首仓不经过此处，由 tokenMonitor.onTokenReceived 直接买入
+  // 执行条件（以首仓盈亏判断币的强弱）：
+  //   情况A：首仓持有中 且 当前价格 > 首仓入场价（首仓盈利 → 强势币）
+  //   情况B：首仓已止盈出场（positionOpen=false 且 sellCount>0）
+  // 不执行条件：
+  //   首仓持有中 且 当前价格 <= 首仓入场价（首仓亏损 → 弱势币，只亏首仓）
   if (prevRsi < config.rsi.buyCross && rsi >= config.rsi.buyCross) {
     if (!token.active) return;
 
-    // EMA 趋势过滤：EMA9 不能明显低于 EMA20
-    const emaOk = (ema9 !== null && ema20 !== null)
-      ? ema9 >= ema20 * config.rsi.emaFilterRatio
-      : true; // EMA 数据不足时不过滤（新币初期）
+    // 判断是否允许执行RSI策略
+    const firstPosInProfit = token.positionOpen &&
+                             token.entryPrice &&
+                             price > token.entryPrice;   // 首仓持有且盈利
+    const firstPosTookProfit = !token.positionOpen &&
+                               token.sellCount > 0;      // 首仓已止盈出场
 
-    if (!emaOk) {
-      console.log(`[Strategy] SKIP add (EMA9=${ema9?.toFixed(0)} < EMA20×${config.rsi.emaFilterRatio}=${(ema20*config.rsi.emaFilterRatio)?.toFixed(0)}): ${token.symbol}`);
+    const rsiStrategyAllowed = firstPosInProfit || firstPosTookProfit;
+
+    if (!rsiStrategyAllowed) {
+      console.log(`[Strategy] SKIP add (first pos losing, price=$${price} entry=$${token.entryPrice}): ${token.symbol}`);
       return;
     }
 
@@ -176,7 +170,7 @@ async function evaluateStrategy(address, candle) {
       const reason = canDoubleAdd
         ? `RE_ADD (drop≥${config.rsi.reAddDropPct}%)`
         : `RSI_CROSS_UP_${config.rsi.buyCross}`;
-      console.log(`[Strategy] BUY add ${reason}: ${token.symbol} RSI=${rsi.toFixed(2)} EMA9=${ema9?.toFixed(0)} EMA20=${ema20?.toFixed(0)} price=$${price}`);
+      console.log(`[Strategy] BUY add ${reason}: ${token.symbol} RSI=${rsi.toFixed(2)} price=$${price}`);
       await webhookSender.sendBuy(address, token.symbol, reason, price);
       token.addPositionOpen = true;
       token.addEntryPrice   = price;
