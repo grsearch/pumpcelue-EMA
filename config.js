@@ -20,7 +20,7 @@ module.exports = {
   },
   monitor: {
     tokenMaxAgeMinutes:    parseInt(process.env.TOKEN_MAX_AGE_MINUTES)    || 60,
-    candleIntervalSeconds: parseInt(process.env.CANDLE_INTERVAL_SECONDS)  || 5,
+    candleIntervalSeconds: parseInt(process.env.CANDLE_INTERVAL_SECONDS)  || 15,
     fdvMinimum:            parseFloat(process.env.FDV_MINIMUM)             || 10000,
   },
   rsi: {
