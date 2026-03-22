@@ -20,14 +20,12 @@ module.exports = {
   },
   monitor: {
     tokenMaxAgeMinutes:    parseInt(process.env.TOKEN_MAX_AGE_MINUTES)    || 60,
-    candleIntervalSeconds: parseInt(process.env.CANDLE_INTERVAL_SECONDS)  || 15,
+    candleIntervalSeconds: parseInt(process.env.CANDLE_INTERVAL_SECONDS)  || 5,
     fdvMinimum:            parseFloat(process.env.FDV_MINIMUM)            || 10000,
   },
   rsi: {
     period:    parseInt(process.env.RSI_PERIOD)      || 7,
     buyCross:  parseFloat(process.env.RSI_BUY_CROSS) || 30,  // 上穿买入
-    sellHigh:  parseFloat(process.env.RSI_SELL_HIGH) || 80,  // RSI > 80 卖出
-    sellCross: parseFloat(process.env.RSI_SELL_CROSS)|| 70,  // RSI 下穿 70 卖出
     tpPct:     parseFloat(process.env.TP_PCT)        || 50,  // 止盈百分比
     slPct:     parseFloat(process.env.SL_PCT)        || 50,  // 止损百分比
   },
