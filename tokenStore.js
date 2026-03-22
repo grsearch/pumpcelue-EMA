@@ -28,10 +28,12 @@ class TokenStore extends EventEmitter {
       rsi:          null,
       prevRsi:      null,
       // 仓位状态（仅追踪 RSI 上穿30买入的仓位）
+      positionOpen:    false,     // 首仓是否持有
+      isFirstPosition: false,     // true=首仓
+      entryPrice:      null,      // 首仓入场价
       addPositionOpen: false,
       addEntryPrice:   null,
       additionCount:   0,
-      hasBought:       false, // 整个监控周期只买一次
       sellCount:       0,
       active:       true,
 
