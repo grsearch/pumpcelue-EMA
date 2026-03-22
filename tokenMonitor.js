@@ -8,7 +8,10 @@ const birdeyeWs     = require('./birdeyeWs');
 const webhookSender = require('./webhookSender');
 const { evaluateStrategy } = require('./strategy');
 
-// 年龄计时器：每分钟更新所有 active token 的 age，到期发 SELL 并移除
+// ── 年龄计时器 ────────────────────────────────────────────────────
+// 每分钟检查所有 active token，到期时：
+//   有首仓持仓 → 发 SELL AGE_EXPIRE，再移除
+//   无持仓（已止盈）→ 直接移除
 function startAgeTicker() {
   setInterval(async () => {
     const now    = Date.now();
@@ -21,25 +24,27 @@ function startAgeTicker() {
       if (now - token.addedAt >= maxAge) {
         console.log(`[Monitor] AGE_EXPIRE: ${token.symbol} (${age}m)`);
 
-        // 停止订阅
         birdeyeWs.unsubscribe(token.address);
         tokenStore.removeToken(token.address);
 
-        // 有任何持仓都发 SELL 信号
-        if (token.positionOpen || token.addPositionOpen) {
+        if (token.positionOpen) {
           await webhookSender.sendSell(
             token.address,
             token.symbol,
             'AGE_EXPIRE',
             token.price
           );
+          token.positionOpen    = false;
+          token.isFirstPosition = false;
+          token.entryPrice      = null;
+          token.pnl             = 0;
         }
       }
     }
   }, 60 * 1000);
 }
 
-// REST 兜底轮询：WS 断线期间每 10s 拉一次价格，保持价格更新
+// ── REST 兜底轮询 ──────────────────────────────────────────────────
 function startRestFallback(address) {
   const interval = setInterval(async () => {
     const token = tokenStore.getToken(address);
@@ -47,7 +52,6 @@ function startRestFallback(address) {
       clearInterval(interval);
       return;
     }
-    // WS 已连接时不重复拉取
     if (birdeyeWs.connected) return;
 
     const price = await birdeyeRest.getPrice(address);
@@ -57,11 +61,11 @@ function startRestFallback(address) {
   }, 10000);
 }
 
-// 新代币入列主流程
+// ── 新代币入列主流程 ───────────────────────────────────────────────
 async function onTokenReceived({ address, symbol, network }) {
   console.log(`[Monitor] New token: ${symbol} (${address})`);
 
-  // 1. 拉取元数据（LP / FDV / 价格）
+  // 1. 拉取元数据
   const overview = await birdeyeRest.getTokenOverview(address);
   if (overview) {
     tokenStore.updateTokenData(address, {
@@ -79,38 +83,32 @@ async function onTokenReceived({ address, symbol, network }) {
     }
   }
 
-  // 2. 立即买入首仓（FIRST_POSITION）
   const token = tokenStore.getToken(address);
   if (!token || !token.active) return;
 
-  await webhookSender.sendBuy(address, symbol, 'FIRST_POSITION', token.price);
+  // 2. 立即买入首仓
+  const entryPrice = token.price;
+  await webhookSender.sendBuy(address, symbol, 'FIRST_POSITION', entryPrice);
   tokenStore.updateTokenData(address, {
     positionOpen:    true,
     isFirstPosition: true,
-    entryPrice:      token.price,
-    firstPosSold:    false,
+    entryPrice:      entryPrice,
+    entryAt:         Date.now(),
   });
+  console.log(`[Monitor] FIRST_POSITION entry=$${entryPrice} ${symbol}`);
 
-  // 3. RSI 预热：拉取 50 根 1m K 线
-  const ohlcv = await birdeyeRest.getOHLCV(address, 50);
-  if (ohlcv && ohlcv.length > 0) {
-    for (const bar of ohlcv) {
-      tokenStore.pushClose(address, bar.c ?? bar.close);
-    }
-    console.log(`[Monitor] RSI warm-up: ${ohlcv.length} candles loaded for ${symbol}`);
-  }
-
-  // 4. 订阅 WS 成交流
+  // 3. 订阅 WS（实时止盈由 birdeyeWs._checkTakeProfit 处理）
   birdeyeWs.subscribe(address);
 
-  // 5. 启动 REST 兜底轮询
+  // 4. REST 兜底（WS 断线时保持价格更新）
   startRestFallback(address);
 
-  // 6. 监听 newCandle 事件 → 跑策略
-  tokenStore.on('newCandle', async ({ address: addr, candle, token: t }) => {
+  // 5. 每根 K 线结束时做一次止盈检查（兜底，防止成交稀少时 WS 检查不及时）
+  tokenStore.on('newCandle', async ({ address: addr, candle }) => {
     if (addr !== address) return;
+    const t = tokenStore.getToken(addr);
+    if (!t || !t.active) return;
     await evaluateStrategy(addr, candle);
-    tokenStore.emit('tokenUpdated', tokenStore.getToken(addr) || t);
   });
 }
 
