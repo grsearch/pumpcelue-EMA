@@ -4,6 +4,7 @@ const EventEmitter = require('events');
 class TokenStore extends EventEmitter {
   constructor() {
     super();
+    this.setMaxListeners(200); // 多币并发时防止 MaxListenersExceededWarning
     this.tokens    = new Map();
     this.signalLog = [];
   }
@@ -13,32 +14,42 @@ class TokenStore extends EventEmitter {
       return this.tokens.get(address);
     }
     const token = {
+      // ── 基础信息 ──────────────────────────────────────────────────
       address,
       symbol,
       network,
       addedAt:      Date.now(),
       age:          0,
+      active:       true,
+
+      // ── 行情数据 ──────────────────────────────────────────────────
       lp:           null,
       fdv:          null,
       price:        null,
       priceChange:  null,
-      pnl:          0,
       candles:      [],
       closes:       [],
-      rsi:          null,
-      prevRsi:      null,
-      // 仓位状态（仅追踪 RSI 上穿30买入的仓位）
-      positionOpen:    false,     // 首仓是否持有
-      firstPosSold:    false,     // 首仓是否已止盈出场
-      isFirstPosition: false,     // true=首仓
-      entryPrice:      null,      // 首仓入场价
-      addPositionOpen: false,
-      addEntryPrice:   null,
-      additionCount:   0,
-      sellCount:       0,
-      active:       true,
 
+      // ── EMA（由 strategy.js 实时写入）────────────────────────────
+      ema9:         null,
+      ema20:        null,
+
+      // ── 仓位状态 ──────────────────────────────────────────────────
+      hasBought:       false,   // 监控期内是否已买入，true 后不再重复买
+      positionOpen:    false,
+      isFirstPosition: false,
+      entryPrice:      null,
+      entryAt:         null,
+      pnl:             0,
+      sellCount:       0,
+
+      // ── K 线聚合窗口（birdeyeWs 内部使用）───────────────────────
+      _candleWindow: null,
     };
+
+    // 注意：不再有 rsi / addPositionOpen / addEntryPrice / additionCount
+    // / firstPosSold / firstPosStopLoss 等旧字段
+
     this.tokens.set(address, token);
     this.emit('tokenAdded', token);
     return token;
@@ -67,7 +78,7 @@ class TokenStore extends EventEmitter {
     const token = this.tokens.get(address);
     if (!token || !token.active) return;
     token.closes.push(closePrice);
-    if (token.closes.length > 200) token.closes.shift();
+    if (token.closes.length > 300) token.closes.shift();
   }
 
   logSignal(address, symbol, type, strategy, price) {
